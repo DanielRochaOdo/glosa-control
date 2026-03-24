@@ -1,0 +1,39 @@
+{
+  "name": "control-glosa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sistema de controle de glosa com importacao de procedimentos e grupos de codigos.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DanielRochaOdo/glosa-control.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/DanielRochaOdo/glosa-control/issues"
+  },
+  "homepage": "https://github.com/DanielRochaOdo/glosa-control#readme",
+  "devDependencies": {
+    "@types/papaparse": "^5.5.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.2"
+  },
+  "dependencies": {
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.7",
+    "papaparse": "^5.5.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "xlsx": "^0.18.5"
+  }
+}
