@@ -200,6 +200,10 @@ function App() {
         : [],
     [analytics, checkedGroupCodes, selectedGroup],
   );
+  const priorityDentistCount = useMemo(
+    () => prioritizedDentists.filter((dentist) => dentist.isPriority).length,
+    [prioritizedDentists],
+  );
 
   useEffect(() => {
     setIsEditingGroupName(false);
@@ -486,16 +490,54 @@ function App() {
 
     autoTable(doc, {
       startY: docWithTable.lastAutoTable?.finalY ? docWithTable.lastAutoTable.finalY + 18 : 360,
-      head: [['Dentista', 'Codigo', 'Procedimento', 'Total', '% selecionado', 'Prioridade']],
-      body: prioritizeDentists(analytics.dentists, checkedGroupCodes, selectedGroup.cutoffPercentage).flatMap((dentist) =>
-        dentist.codes.map((code) => [
-          dentist.nomeDentista,
-          code.codigoProcedimento,
-          code.nomeProcedimento,
-          String(code.total),
-          `${formatPercent(dentist.selectedPercentage)}%`,
-          dentist.isPriority ? 'Sim' : 'Nao',
-        ]),
+      head: [['Dentista', 'Codigo', 'Procedimento', 'Total', '%']],
+      body: prioritizeDentists(analytics.dentists, checkedGroupCodes, selectedGroup.cutoffPercentage).flatMap(
+        (dentist) => {
+          const dentistStyles = dentist.isPriority
+            ? { textColor: [154, 60, 71] as [number, number, number], fontStyle: 'bold' as const }
+            : {};
+
+          return dentist.codes.map((code, index) => {
+            const codePercentage = dentist.total > 0 ? (code.total / dentist.total) * 100 : 0;
+
+            return [
+              ...(index === 0
+                ? [
+                    {
+                      content: dentist.nomeDentista,
+                      rowSpan: dentist.codes.length,
+                      styles: {
+                        valign: 'middle' as const,
+                        ...dentistStyles,
+                      },
+                    },
+                  ]
+                : []),
+              {
+                content: code.codigoProcedimento,
+                styles: dentistStyles,
+              },
+              {
+                content: code.nomeProcedimento,
+                styles: dentistStyles,
+              },
+              {
+                content: String(code.total),
+                styles: {
+                  halign: 'right' as const,
+                  ...dentistStyles,
+                },
+              },
+              {
+                content: `${formatPercent(codePercentage)}%`,
+                styles: {
+                  halign: 'right' as const,
+                  ...dentistStyles,
+                },
+              },
+            ];
+          });
+        },
       ),
       theme: 'grid',
       headStyles: { fillColor: [223, 240, 227], textColor: [35, 49, 39], fontSize: 9 },
@@ -508,20 +550,7 @@ function App() {
         1: { cellWidth: 70 },
         2: { cellWidth: 170 },
         3: { cellWidth: 45, halign: 'right' },
-        4: { cellWidth: 60, halign: 'right' },
-        5: { cellWidth: 55, halign: 'center' },
-      },
-      didParseCell: (hookData) => {
-        if (hookData.section !== 'body') {
-          return;
-        }
-
-        const rowValues = hookData.row.raw as string[];
-
-        if (rowValues[5] === 'Sim') {
-          hookData.cell.styles.textColor = [154, 60, 71];
-          hookData.cell.styles.fontStyle = 'bold';
-        }
+        4: { cellWidth: 55, halign: 'right' },
       },
       didDrawPage: (data) => {
         const pageNumber = doc.getNumberOfPages();
@@ -544,7 +573,44 @@ function App() {
       <header className="topbar">
         <div className="brand-block">
           <div className="brand-top-row">
-            <span className="eyebrow">Controle de Glosa</span>
+            <span className="eyebrow">
+              <svg viewBox="0 0 64 64" aria-hidden="true">
+                <path
+                  d="M16 8h20l12 12v28c0 4.4-3.6 8-8 8H16c-4.4 0-8-3.6-8-8V16c0-4.4 3.6-8 8-8Z"
+                  fill="currentColor"
+                  opacity="0.16"
+                />
+                <path
+                  d="M36 8v12h12"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M24 36c0-5.5 4.5-10 10-10s10 4.5 10 10s-4.5 10-10 10s-10-4.5-10-10Z"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                />
+                <path
+                  d="m41 43 7 7"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M16 8h20l12 12v28c0 4.4-3.6 8-8 8H16c-4.4 0-8-3.6-8-8V16c0-4.4 3.6-8 8-8Z"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              Auditoria de Procedimentos
+            </span>
             <button
               type="button"
               className="theme-toggle"
@@ -593,11 +659,80 @@ function App() {
               </span>
               <button
                 type="button"
-                className="danger-button small-button"
+                className="danger-button icon-button small-button upload-clear-button"
                 onClick={() => setIsConfirmDeleteOpen(true)}
                 disabled={!dataset && groups.length === 0}
+                aria-label="Limpar dados importados"
+                title="Limpar dados importados"
               >
-                Excluir
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="m14.5 4 5.5 5.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="m13 5.5 5.5 5.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="m12 7 4.5 4.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="m4 15.5 6.5-6.5 4 4L8 19.5H4v-4Z"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M4.5 20h8"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  />
+                  <path
+                    d="M17.25 15.25v2.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                  />
+                  <path
+                    d="M16 16.5h2.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                  />
+                  <path
+                    d="M19.25 11.75v1.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                  <path
+                    d="M18.5 12.5H20"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                </svg>
               </button>
             </div>
           </div>
@@ -942,7 +1077,12 @@ function App() {
                     <div className="panel-title-row">
                       <div>
                         <h3>Procedimentos por dentista</h3>
-                        <p className="subtle-text">Visualizacao abaixo dos codigos, no mesmo fluxo do PDF</p>
+                        <p className={`nonconformity-text ${priorityDentistCount > 0 ? 'critical' : ''}`}>
+                          {priorityDentistCount}{' '}
+                          {priorityDentistCount === 1
+                            ? 'dentista em nao conformidade'
+                            : 'dentistas em nao conformidade'}
+                        </p>
                       </div>
                     </div>
 
