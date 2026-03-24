@@ -577,8 +577,8 @@ function App() {
               )}
             </button>
           </div>
-          <h1>Painel de grupos e procedimentos</h1>
-          <p>Importe a planilha, monte grupos por codigo e acompanhe pesos, recorrencia e dentistas.</p>
+          <h1>Painel de auditoria de procedimentos</h1>
+          <p>Importe a planilha, monte grupos por codigo e acompanhe pesos, recorrencia por dentistas.</p>
         </div>
 
         <div className="upload-card glass-card">
