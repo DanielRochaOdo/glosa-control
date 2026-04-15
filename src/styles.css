@@ -213,6 +213,7 @@ button {
 .detail-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
 }
 
 .upload-status-actions {
@@ -590,10 +591,123 @@ button {
   color: var(--accent-strong);
 }
 
+.group-chart-button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 7px;
+  color: #4f7f5b;
+}
+
+.group-lock-button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 7px;
+}
+
+.group-lock-button.locked {
+  color: #8d3742;
+}
+
+.group-lock-button.unlocked {
+  color: #4f7f5b;
+}
+
 .group-edit-button svg,
-.group-delete-button svg {
+.group-delete-button svg,
+.group-chart-button svg,
+.group-lock-button svg {
   width: 14px;
   height: 14px;
+}
+
+.month-selector {
+  display: grid;
+  gap: 4px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.month-selector input {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: inherit;
+  border-radius: 12px;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+}
+
+.charts-screen {
+  display: grid;
+  gap: 14px;
+}
+
+.charts-layout {
+  display: grid;
+  gap: 14px;
+}
+
+@media (min-width: 960px) {
+  .charts-layout {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.monthly-code-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.code-month-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  background: var(--surface);
+}
+
+.dentist-trend-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.recurring-dentist-toggle {
+  display: grid;
+  gap: 8px;
+}
+
+.recurring-dentist-toggle .row-stats {
+  justify-items: start;
+}
+
+.recurring-dentist-details {
+  display: grid;
+  gap: 8px;
+}
+
+.recurring-month-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.recurring-month-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.recurring-month-header strong {
+  color: inherit;
+  font-size: 0.78rem;
+}
+
+.recurring-codes {
+  margin-top: 0;
 }
 
 .content-column,
@@ -984,5 +1098,9 @@ button {
   .modal-actions {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .month-selector {
+    width: 100%;
   }
 }

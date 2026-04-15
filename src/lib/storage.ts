@@ -84,13 +84,21 @@ const normalizeGroups = (groups: ProcedureGroup[] | unknown): ProcedureGroup[] =
           return null;
         })
         .filter((item): item is string => Boolean(item));
+      const rawCheckedCodes = Array.isArray(currentGroup.checkedCodes) ? currentGroup.checkedCodes : [];
+      const checkedCodes = rawCheckedCodes
+        .map((item) => (typeof item === 'string' ? item : null))
+        .filter((item): item is string => Boolean(item))
+        .filter((item) => codes.includes(item));
 
       return {
         id: String(currentGroup.id ?? ''),
         name: String(currentGroup.name ?? ''),
         codes,
+        checkedCodes,
         cutoffPercentage:
           typeof currentGroup.cutoffPercentage === 'number' ? currentGroup.cutoffPercentage : 50,
+        isLocked: typeof currentGroup.isLocked === 'boolean' ? currentGroup.isLocked : false,
+        lockedAt: typeof currentGroup.lockedAt === 'string' ? currentGroup.lockedAt : null,
         createdAt: String(currentGroup.createdAt ?? new Date().toISOString()),
         updatedAt: String(currentGroup.updatedAt ?? new Date().toISOString()),
       };

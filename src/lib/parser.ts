@@ -1,7 +1,9 @@
 import Papa from 'papaparse';
 import type { ImportedDataset, ProcedureConflict, ProcedureRecord } from '../types';
 
-const REQUIRED_COLUMNS = ['codigoprocedimento', 'nomeprocedimento', 'nomedentista'];
+const REQUIRED_COLUMNS = ['codigoprocedimento', 'nomeprocedimento', 'nomedentista', 'datarealizacao'];
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const EXCEL_EPOCH_UTC = Date.UTC(1899, 11, 30);
 
 const normalizeHeader = (value: string) =>
   value
@@ -13,6 +15,103 @@ const normalizeHeader = (value: string) =>
 
 const normalizeCell = (value: unknown) => String(value ?? '').trim();
 
+const buildIsoDate = (year: number, month: number, day: number): string | null => {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() + 1 !== month ||
+    date.getUTCDate() !== day ||
+    year < 1900 ||
+    year > 2100
+  ) {
+    return null;
+  }
+
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+};
+
+const parseExcelSerialDate = (serial: number): string | null => {
+  if (!Number.isFinite(serial)) {
+    return null;
+  }
+
+  const wholeDays = Math.trunc(serial);
+
+  if (wholeDays <= 0) {
+    return null;
+  }
+
+  const date = new Date(EXCEL_EPOCH_UTC + wholeDays * DAY_IN_MS);
+  return buildIsoDate(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
+};
+
+const parseDateText = (value: string): string | null => {
+  const text = value.trim();
+
+  if (!text) {
+    return null;
+  }
+
+  const isoLikeMatch = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+
+  if (isoLikeMatch) {
+    const [, year, month, day] = isoLikeMatch;
+    return buildIsoDate(Number(year), Number(month), Number(day));
+  }
+
+  const brLikeMatch = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+
+  if (brLikeMatch) {
+    const [, day, month, yearRaw] = brLikeMatch;
+    const year = yearRaw.length === 2 ? Number(`20${yearRaw}`) : Number(yearRaw);
+    return buildIsoDate(year, Number(month), Number(day));
+  }
+
+  const parsed = new Date(text);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return buildIsoDate(parsed.getUTCFullYear(), parsed.getUTCMonth() + 1, parsed.getUTCDate());
+};
+
+const normalizeRealizationDate = (value: unknown): string | null => {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return buildIsoDate(value.getUTCFullYear(), value.getUTCMonth() + 1, value.getUTCDate());
+  }
+
+  if (typeof value === 'number') {
+    return parseExcelSerialDate(value);
+  }
+
+  const text = normalizeCell(value);
+
+  if (!text) {
+    return null;
+  }
+
+  if (/^\d+(?:[.,]\d+)?$/.test(text)) {
+    const numericValue = Number.parseFloat(text.replace(',', '.'));
+    const serialDate = parseExcelSerialDate(numericValue);
+
+    if (serialDate) {
+      return serialDate;
+    }
+  }
+
+  return parseDateText(text);
+};
+
 const mapRow = (row: Record<string, unknown>, index: number): ProcedureRecord | null => {
   const normalizedMap = new Map<string, unknown>();
 
@@ -23,14 +122,15 @@ const mapRow = (row: Record<string, unknown>, index: number): ProcedureRecord | 
   const codigoProcedimento = normalizeCell(normalizedMap.get('codigoprocedimento'));
   const nomeProcedimento = normalizeCell(normalizedMap.get('nomeprocedimento'));
   const nomeDentista = normalizeCell(normalizedMap.get('nomedentista'));
+  const dataRealizacao = normalizeRealizationDate(normalizedMap.get('datarealizacao'));
 
-  if (!codigoProcedimento && !nomeProcedimento && !nomeDentista) {
+  if (!codigoProcedimento && !nomeProcedimento && !nomeDentista && !dataRealizacao) {
     return null;
   }
 
-  if (!codigoProcedimento || !nomeProcedimento || !nomeDentista) {
+  if (!codigoProcedimento || !nomeProcedimento || !nomeDentista || !dataRealizacao) {
     throw new Error(
-      `Linha ${index + 2} inválida. As colunas codigoProcedimento, nomeProcedimento e nomeDentista precisam estar preenchidas.`,
+      `Linha ${index + 2} invalida. As colunas codigoProcedimento, nomeProcedimento, nomeDentista e dataRealizacao precisam estar preenchidas.`,
     );
   }
 
@@ -39,6 +139,7 @@ const mapRow = (row: Record<string, unknown>, index: number): ProcedureRecord | 
     codigoProcedimento,
     nomeProcedimento,
     nomeDentista,
+    dataRealizacao,
   };
 };
 
@@ -48,7 +149,7 @@ const validateHeaders = (headers: string[]) => {
 
   if (missing.length > 0) {
     throw new Error(
-      `Arquivo sem colunas obrigatórias: ${missing.join(', ')}. Esperado: codigoProcedimento, nomeProcedimento, nomeDentista.`,
+      `Arquivo sem colunas obrigatorias: ${missing.join(', ')}. Esperado: codigoProcedimento, nomeProcedimento, nomeDentista, dataRealizacao.`,
     );
   }
 };
@@ -107,7 +208,7 @@ const parseCsv = async (file: File) =>
 const parseSpreadsheet = async (file: File) => {
   const XLSX = await import('xlsx');
   const buffer = await file.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: 'array' });
+  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
   const firstSheetName = workbook.SheetNames[0];
 
   if (!firstSheetName) {
@@ -121,12 +222,28 @@ const parseSpreadsheet = async (file: File) => {
   });
 };
 
+const detectCompetencyMonth = (records: ProcedureRecord[]): string => {
+  const months = Array.from(new Set(records.map((record) => record.dataRealizacao.slice(0, 7))));
+
+  if (months.length === 0) {
+    throw new Error('Nao foi possivel identificar o mes pela coluna dataRealizacao.');
+  }
+
+  if (months.length > 1) {
+    throw new Error(
+      `Arquivo contem mais de um mes em dataRealizacao (${months.join(', ')}). Envie um arquivo por mes.`,
+    );
+  }
+
+  return months[0];
+};
+
 export const parseUploadedFile = async (file: File): Promise<ImportedDataset> => {
   const isCsv = file.name.toLowerCase().endsWith('.csv');
   const rows = isCsv ? await parseCsv(file) : await parseSpreadsheet(file);
 
   if (rows.length === 0) {
-    throw new Error('O arquivo não possui linhas para importar.');
+    throw new Error('O arquivo nao possui linhas para importar.');
   }
 
   validateHeaders(Object.keys(rows[0]));
@@ -136,12 +253,13 @@ export const parseUploadedFile = async (file: File): Promise<ImportedDataset> =>
     .filter((row): row is ProcedureRecord => row !== null);
 
   if (records.length === 0) {
-    throw new Error('Nenhum registro válido foi encontrado no arquivo.');
+    throw new Error('Nenhum registro valido foi encontrado no arquivo.');
   }
 
   return {
     fileName: file.name,
     importedAt: new Date().toISOString(),
+    competencyMonth: detectCompetencyMonth(records),
     records,
     conflicts: collectConflicts(records),
   };

@@ -1,8 +1,15 @@
 import { ChangeEvent, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { analyzeGroup, summarizeCodes } from './lib/analytics';
+import { deleteGroupFromCloud, loadRemoteGroups, loadSnapshotsByGroup, saveMonthlySnapshot, syncGroupToCloud } from './lib/history';
 import { parseUploadedFile } from './lib/parser';
 import { loadDataset, loadGroups, saveDataset, saveGroups } from './lib/storage';
-import type { CodeSummary, DentistBreakdown, ImportedDataset, ProcedureGroup } from './types';
+import type {
+  CodeSummary,
+  DentistBreakdown,
+  GroupMonthlySnapshot,
+  ImportedDataset,
+  ProcedureGroup,
+} from './types';
 
 const formatPercent = (value: number) =>
   new Intl.NumberFormat('pt-BR', {
@@ -15,6 +22,49 @@ const formatDate = (isoDate: string) =>
     dateStyle: 'short',
     timeStyle: 'short',
   }).format(new Date(isoDate));
+
+const formatMonth = (value: string) => {
+  const [year, month] = value.split('-');
+
+  if (!year || !month) {
+    return value;
+  }
+
+  return `${month}/${year}`;
+};
+
+const getCurrentMonth = () => new Date().toISOString().slice(0, 7);
+
+const normalizeMonthValue = (value: string) => (/^\d{4}-\d{2}$/.test(value) ? value : getCurrentMonth());
+
+const extractMonthFromDate = (value: unknown) => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const match = value.match(/^(\d{4})-(\d{2})-\d{2}$/);
+  return match ? `${match[1]}-${match[2]}` : null;
+};
+
+const getDatasetCompetencyMonth = (dataset: ImportedDataset) => {
+  if (/^\d{4}-\d{2}$/.test(dataset.competencyMonth)) {
+    return dataset.competencyMonth;
+  }
+
+  const months = Array.from(
+    new Set(
+      dataset.records
+        .map((record) => extractMonthFromDate(record.dataRealizacao))
+        .filter((month): month is string => Boolean(month)),
+    ),
+  );
+
+  if (months.length === 1) {
+    return months[0];
+  }
+
+  return normalizeMonthValue(dataset.importedAt.slice(0, 7));
+};
 
 const sanitizePercentage = (value: string) => {
   const parsed = Number.parseFloat(value);
@@ -39,10 +89,67 @@ const loadThemePreference = () => {
   return window.localStorage.getItem('control-glosa:theme') === 'dark' ? 'dark' : 'light';
 };
 
+const normalizeGroup = (group: ProcedureGroup): ProcedureGroup => {
+  const normalizedCodes = Array.from(new Set(group.codes));
+  const normalizedCheckedCodes = Array.from(
+    new Set(group.checkedCodes.filter((code) => normalizedCodes.includes(code))),
+  );
+
+  return {
+    ...group,
+    codes: normalizedCodes,
+    checkedCodes: normalizedCheckedCodes,
+  };
+};
+
+const mergeLocalAndRemoteGroups = (localGroups: ProcedureGroup[], remoteGroups: ProcedureGroup[]) => {
+  const merged = new Map<string, ProcedureGroup>();
+
+  localGroups.forEach((group) => merged.set(group.id, normalizeGroup(group)));
+
+  remoteGroups.forEach((remoteGroup) => {
+    const current = merged.get(remoteGroup.id);
+
+    if (!current) {
+      merged.set(remoteGroup.id, normalizeGroup(remoteGroup));
+      return;
+    }
+
+    const currentUpdated = new Date(current.updatedAt).getTime();
+    const remoteUpdated = new Date(remoteGroup.updatedAt).getTime();
+    merged.set(remoteGroup.id, normalizeGroup(remoteUpdated >= currentUpdated ? remoteGroup : current));
+  });
+
+  return Array.from(merged.values()).sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  );
+};
+
+const makeSnapshotId = (groupId: string, competencyMonth: string) => `${groupId}:${competencyMonth}`;
+
 type PrioritizedDentist = DentistBreakdown & {
   selectedTotal: number;
   selectedPercentage: number;
   isPriority: boolean;
+};
+
+type RecurringMonthDetail = {
+  month: string;
+  selectedTotal: number;
+  total: number;
+  selectedPercentage: number;
+  checkedCodes: {
+    codigoProcedimento: string;
+    nomeProcedimento: string;
+    total: number;
+    actualPercentage: number;
+  }[];
+};
+
+type RecurringDentistDetail = {
+  nomeDentista: string;
+  months: number;
+  details: RecurringMonthDetail[];
 };
 
 const prioritizeDentists = (
@@ -90,6 +197,11 @@ function App() {
   const [dataset, setDataset] = useState<ImportedDataset | null>(null);
   const [groups, setGroups] = useState<ProcedureGroup[]>(() => loadGroups());
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(() => loadGroups()[0]?.id ?? null);
+  const [view, setView] = useState<'dashboard' | 'charts'>('dashboard');
+  const [reportMonth, setReportMonth] = useState(getCurrentMonth);
+  const [chartGroupId, setChartGroupId] = useState<string | null>(null);
+  const [groupSnapshots, setGroupSnapshots] = useState<GroupMonthlySnapshot[]>([]);
+  const [isLoadingSnapshots, setIsLoadingSnapshots] = useState(false);
   const [groupName, setGroupName] = useState('');
   const [createCodeQuery, setCreateCodeQuery] = useState('');
   const [editCodeQuery, setEditCodeQuery] = useState('');
@@ -99,9 +211,10 @@ function App() {
   const [isEditingGroupName, setIsEditingGroupName] = useState(false);
   const [editingGroupName, setEditingGroupName] = useState('');
   const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = useState(false);
-  const [checkedGroupCodes, setCheckedGroupCodes] = useState<string[]>([]);
   const [expandedDentists, setExpandedDentists] = useState<string[]>([]);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [chartFeedback, setChartFeedback] = useState<string | null>(null);
+  const [reportFeedback, setReportFeedback] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [storageMessage, setStorageMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -138,11 +251,48 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let isMounted = true;
+
+    const restoreCloudGroups = async () => {
+      try {
+        const remoteGroups = await loadRemoteGroups();
+
+        if (!isMounted || remoteGroups.length === 0) {
+          return;
+        }
+
+        setGroups((current) => mergeLocalAndRemoteGroups(current, remoteGroups));
+        setStorageMessage(null);
+      } catch (error) {
+        if (isMounted) {
+          setStorageMessage(error instanceof Error ? error.message : 'Falha ao carregar grupos no Supabase.');
+        }
+      }
+    };
+
+    void restoreCloudGroups();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     try {
-      saveGroups(groups);
+      saveGroups(groups.map((group) => normalizeGroup(group)));
     } catch (error) {
       setStorageMessage(error instanceof Error ? error.message : 'Falha ao salvar os grupos localmente.');
     }
+
+    const syncGroups = async () => {
+      try {
+        await Promise.all(groups.map((group) => syncGroupToCloud(normalizeGroup(group))));
+      } catch (error) {
+        setStorageMessage(error instanceof Error ? error.message : 'Falha ao sincronizar grupos no Supabase.');
+      }
+    };
+
+    void syncGroups();
   }, [groups]);
 
   useEffect(() => {
@@ -163,7 +313,23 @@ function App() {
   }, [dataset, isRestoringDataset]);
 
   useEffect(() => {
-    if (!selectedGroupId && groups.length > 0) {
+    if (!dataset) {
+      setReportMonth(getCurrentMonth());
+      return;
+    }
+
+    setReportMonth(getDatasetCompetencyMonth(dataset));
+  }, [dataset]);
+
+  useEffect(() => {
+    if (groups.length === 0) {
+      if (selectedGroupId) {
+        setSelectedGroupId(null);
+      }
+      return;
+    }
+
+    if (!selectedGroupId || !groups.some((group) => group.id === selectedGroupId)) {
       setSelectedGroupId(groups[0].id);
     }
   }, [groups, selectedGroupId]);
@@ -185,6 +351,11 @@ function App() {
     () => groups.find((group) => group.id === selectedGroupId) ?? null,
     [groups, selectedGroupId],
   );
+  const datasetCompetencyMonth = useMemo(
+    () => (dataset ? getDatasetCompetencyMonth(dataset) : null),
+    [dataset],
+  );
+  const checkedGroupCodes = selectedGroup?.checkedCodes ?? [];
   const analytics = useMemo(
     () => (selectedGroup && dataset ? analyzeGroup(selectedGroup, dataset.records) : null),
     [selectedGroup, dataset],
@@ -209,17 +380,7 @@ function App() {
     setIsEditingGroupName(false);
     setEditingGroupName(selectedGroup?.name ?? '');
     setExpandedDentists([]);
-    setCheckedGroupCodes([]);
   }, [selectedGroup?.id, selectedGroup?.name]);
-
-  useEffect(() => {
-    if (!selectedGroup) {
-      setCheckedGroupCodes([]);
-      return;
-    }
-
-    setCheckedGroupCodes((current) => current.filter((code) => selectedGroup.codes.includes(code)));
-  }, [selectedGroup]);
 
   const createSuggestions = useMemo(
     () =>
@@ -263,6 +424,15 @@ function App() {
     setCreateCodeQuery('');
   };
 
+  const selectGroup = (groupId: string) => {
+    setSelectedGroupId(groupId);
+    setReportFeedback(null);
+
+    if (dataset) {
+      setReportMonth(getDatasetCompetencyMonth(dataset));
+    }
+  };
+
   const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
 
@@ -272,13 +442,16 @@ function App() {
 
     setIsImporting(true);
     setFeedback(null);
+    setReportFeedback(null);
     setErrorMessage(null);
     setStorageMessage(null);
 
     try {
       const parsed = await parseUploadedFile(file);
       setDataset(parsed);
-      setFeedback(`${parsed.records.length} registros importados de ${parsed.fileName}.`);
+      setFeedback(
+        `${parsed.records.length} registros importados de ${parsed.fileName}. Competencia detectada: ${formatMonth(parsed.competencyMonth)}.`,
+      );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Falha ao importar arquivo.');
     } finally {
@@ -296,10 +469,13 @@ function App() {
     setSelectedCodes((current) => current.filter((item) => item !== code));
   };
 
-  const toggleCheckedGroupCode = (code: string) => {
-    setCheckedGroupCodes((current) =>
-      current.includes(code) ? current.filter((item) => item !== code) : [...current, code],
-    );
+  const toggleCheckedGroupCode = (groupId: string, code: string) => {
+    updateGroup(groupId, (group) => ({
+      ...group,
+      checkedCodes: group.checkedCodes.includes(code)
+        ? group.checkedCodes.filter((item) => item !== code)
+        : [...group.checkedCodes, code],
+    }));
   };
 
   const createGroup = () => {
@@ -322,7 +498,10 @@ function App() {
       id: slugId(),
       name: groupName.trim(),
       codes: selectedCodes,
+      checkedCodes: [],
       cutoffPercentage: 50,
+      isLocked: false,
+      lockedAt: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -339,16 +518,23 @@ function App() {
     setGroups((current) =>
       current.map((group) =>
         group.id === groupId
-          ? {
+          ? normalizeGroup({
               ...updater(group),
               updatedAt: new Date().toISOString(),
-            }
+            })
           : group,
       ),
     );
   };
 
   const addCodeToGroup = (groupId: string, code: string) => {
+    const group = groups.find((item) => item.id === groupId);
+
+    if (!group || group.isLocked) {
+      setErrorMessage('Destrave o grupo para adicionar codigos.');
+      return;
+    }
+
     updateGroup(groupId, (group) => ({
       ...group,
       codes: [...group.codes, code],
@@ -356,13 +542,249 @@ function App() {
     setEditCodeQuery('');
   };
 
-  const deleteGroup = (groupId: string) => {
+  const deleteGroup = async (groupId: string) => {
     const group = groups.find((item) => item.id === groupId);
     const nextGroups = groups.filter((item) => item.id !== groupId);
     setGroups(nextGroups);
     setSelectedGroupId(nextGroups[0]?.id ?? null);
+    setGroupSnapshots((current) => current.filter((snapshot) => snapshot.groupId !== groupId));
+
+    try {
+      await deleteGroupFromCloud(groupId);
+    } catch (error) {
+      setStorageMessage(error instanceof Error ? error.message : 'Falha ao remover grupo no Supabase.');
+    }
+
     setFeedback(group ? `Grupo "${group.name}" removido.` : 'Grupo removido.');
   };
+
+  const toggleGroupLock = (groupId: string) => {
+    const group = groups.find((item) => item.id === groupId);
+
+    if (!group) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    updateGroup(groupId, (current) => ({
+      ...current,
+      isLocked: !current.isLocked,
+      lockedAt: current.isLocked ? null : now,
+    }));
+    setFeedback(group.isLocked ? `Grupo "${group.name}" destravado.` : `Grupo "${group.name}" travado.`);
+    setErrorMessage(null);
+  };
+
+  const openGroupCharts = async (groupId: string) => {
+    selectGroup(groupId);
+    setChartGroupId(groupId);
+    setView('charts');
+    setIsLoadingSnapshots(true);
+    setChartFeedback(null);
+    setStorageMessage(null);
+
+    try {
+      const snapshots = await loadSnapshotsByGroup(groupId);
+      setGroupSnapshots(snapshots);
+      setErrorMessage(null);
+    } catch (error) {
+      setStorageMessage(error instanceof Error ? error.message : 'Falha ao carregar historico mensal.');
+      setGroupSnapshots([]);
+    } finally {
+      setIsLoadingSnapshots(false);
+    }
+  };
+
+  const saveMonthlyGroupReport = async (group: ProcedureGroup) => {
+    if (!dataset) {
+      setReportFeedback(null);
+      setErrorMessage('Importe um arquivo antes de adicionar a competencia ao relatorio mensal.');
+      return;
+    }
+
+    setReportFeedback(null);
+    const currentGroup = groups.find((item) => item.id === group.id) ?? group;
+    const competencyMonth = getDatasetCompetencyMonth(dataset);
+    const now = new Date().toISOString();
+    const currentAnalytics = analyzeGroup(currentGroup, dataset.records);
+    const selectedDentists = prioritizeDentists(
+      currentAnalytics.dentists,
+      currentGroup.checkedCodes,
+      currentGroup.cutoffPercentage,
+    );
+    const lockedGroup = normalizeGroup({
+      ...currentGroup,
+      isLocked: true,
+      lockedAt: currentGroup.lockedAt ?? now,
+      updatedAt: now,
+    });
+
+    setGroups((current) =>
+      current.map((item) => (item.id === currentGroup.id ? lockedGroup : item)),
+    );
+
+    const snapshot: GroupMonthlySnapshot = {
+      id: makeSnapshotId(currentGroup.id, competencyMonth),
+      groupId: currentGroup.id,
+      groupName: currentGroup.name,
+      competencyMonth,
+      sourceFileName: dataset.fileName,
+      importedAt: dataset.importedAt,
+      cutoffPercentage: currentGroup.cutoffPercentage,
+      checkedCodes: currentGroup.checkedCodes,
+      groupTotal: currentAnalytics.groupTotal,
+      codes: currentAnalytics.codes,
+      dentists: selectedDentists.map((dentist) => ({
+        nomeDentista: dentist.nomeDentista,
+        total: dentist.total,
+        selectedTotal: dentist.selectedTotal,
+        selectedPercentage: dentist.selectedPercentage,
+        isPriority: dentist.isPriority,
+        codes: dentist.codes.map((code) => ({
+          codigoProcedimento: code.codigoProcedimento,
+          nomeProcedimento: code.nomeProcedimento,
+          total: code.total,
+          actualPercentage: dentist.total > 0 ? (code.total / dentist.total) * 100 : 0,
+          isChecked: currentGroup.checkedCodes.includes(code.codigoProcedimento),
+        })),
+      })),
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    try {
+      await syncGroupToCloud(lockedGroup);
+      await saveMonthlySnapshot(snapshot);
+      const successMessage = `Competencia ${formatMonth(competencyMonth)} adicionada ao grupo "${currentGroup.name}" com sucesso.`;
+
+      if (view === 'charts' && chartGroupId === currentGroup.id) {
+        const snapshots = await loadSnapshotsByGroup(currentGroup.id);
+        setGroupSnapshots(snapshots);
+        setChartFeedback(successMessage);
+      } else {
+        setChartFeedback(null);
+      }
+      setReportFeedback(successMessage);
+
+      setFeedback(
+        `Relatorio de ${formatMonth(competencyMonth)} salvo e grupo "${currentGroup.name}" travado para comparativos.`,
+      );
+      setErrorMessage(null);
+      setStorageMessage(null);
+    } catch (error) {
+      setChartFeedback(null);
+      setReportFeedback(null);
+      setStorageMessage(error instanceof Error ? error.message : 'Falha ao salvar historico mensal.');
+    }
+  };
+
+  const chartGroup = useMemo(
+    () => groups.find((group) => group.id === chartGroupId) ?? null,
+    [chartGroupId, groups],
+  );
+  const maxMonthlyTotal = useMemo(
+    () => Math.max(1, ...groupSnapshots.map((snapshot) => snapshot.groupTotal)),
+    [groupSnapshots],
+  );
+  const checkedCodesForCharts = useMemo(() => {
+    const codeMap = new Map<string, string>();
+
+    groupSnapshots.forEach((snapshot) => {
+      snapshot.codes.forEach((code) => {
+        if (snapshot.checkedCodes.includes(code.codigoProcedimento)) {
+          codeMap.set(code.codigoProcedimento, code.nomeProcedimento);
+        }
+      });
+    });
+
+    return Array.from(codeMap.entries()).map(([codigoProcedimento, nomeProcedimento]) => ({
+      codigoProcedimento,
+      nomeProcedimento,
+    }));
+  }, [groupSnapshots]);
+  const codeMonthSeries = useMemo(
+    () =>
+      checkedCodesForCharts.map((checkedCode) => {
+        const series = groupSnapshots.map((snapshot) => {
+          const code = snapshot.codes.find(
+            (item) => item.codigoProcedimento === checkedCode.codigoProcedimento,
+          );
+
+          return {
+            month: snapshot.competencyMonth,
+            total: code?.total ?? 0,
+            percentage: code?.actualPercentage ?? 0,
+          };
+        });
+
+        return {
+          ...checkedCode,
+          maxTotal: Math.max(1, ...series.map((item) => item.total)),
+          series,
+        };
+      }),
+    [checkedCodesForCharts, groupSnapshots],
+  );
+  const priorityDentistSeries = useMemo(
+    () =>
+      groupSnapshots.map((snapshot) => ({
+        month: snapshot.competencyMonth,
+        total: snapshot.dentists.filter((dentist) => dentist.isPriority).length,
+      })),
+    [groupSnapshots],
+  );
+  const maxPriorityDentists = useMemo(
+    () => Math.max(1, ...priorityDentistSeries.map((item) => item.total)),
+    [priorityDentistSeries],
+  );
+  const recurringDentists = useMemo(() => {
+    const dentistMap = new Map<string, Map<string, RecurringMonthDetail>>();
+
+    groupSnapshots.forEach((snapshot) => {
+      snapshot.dentists
+        .filter((dentist) => dentist.isPriority)
+        .forEach((dentist) => {
+          const checkedCodes = dentist.codes
+            .filter((code) => code.isChecked && code.total > 0)
+            .map((code) => ({
+              codigoProcedimento: code.codigoProcedimento,
+              nomeProcedimento: code.nomeProcedimento,
+              total: code.total,
+              actualPercentage: code.actualPercentage,
+            }))
+            .sort((a, b) => b.total - a.total);
+          const detailsByMonth = dentistMap.get(dentist.nomeDentista) ?? new Map<string, RecurringMonthDetail>();
+
+          detailsByMonth.set(snapshot.competencyMonth, {
+            month: snapshot.competencyMonth,
+            selectedTotal: dentist.selectedTotal,
+            total: dentist.total,
+            selectedPercentage: dentist.selectedPercentage,
+            checkedCodes,
+          });
+          dentistMap.set(dentist.nomeDentista, detailsByMonth);
+        });
+    });
+
+    return Array.from(dentistMap.entries())
+      .map(([nomeDentista, detailsByMonth]): RecurringDentistDetail => {
+        const details = Array.from(detailsByMonth.values()).sort((a, b) => a.month.localeCompare(b.month));
+
+        return {
+          nomeDentista,
+          months: details.length,
+          details,
+        };
+      })
+      .filter((dentist) => dentist.months > 1)
+      .sort((a, b) => {
+        if (b.months !== a.months) {
+          return b.months - a.months;
+        }
+
+        return a.nomeDentista.localeCompare(b.nomeDentista, 'pt-BR');
+      });
+  }, [groupSnapshots]);
 
   const toggleDentistExpansion = (dentistName: string) => {
     setExpandedDentists((current) =>
@@ -372,10 +794,15 @@ function App() {
     );
   };
 
-  const clearImportedData = () => {
+  const clearImportedData = async () => {
+    const groupIds = groups.map((group) => group.id);
+
     setDataset(null);
     setGroups([]);
+    setGroupSnapshots([]);
     setSelectedGroupId(null);
+    setChartGroupId(null);
+    setView('dashboard');
     setSelectedCodes([]);
     setGroupName('');
     setCreateCodeQuery('');
@@ -383,13 +810,25 @@ function App() {
     setIsEditingGroupName(false);
     setEditingGroupName('');
     setFeedback('Dados importados removidos com sucesso.');
+    setReportFeedback(null);
     setErrorMessage(null);
     setStorageMessage(null);
     setIsConfirmDeleteOpen(false);
+
+    try {
+      await Promise.all(groupIds.map((groupId) => deleteGroupFromCloud(groupId)));
+    } catch (error) {
+      setStorageMessage(error instanceof Error ? error.message : 'Falha ao limpar grupos no Supabase.');
+    }
   };
 
   const saveGroupName = () => {
     if (!selectedGroup) {
+      return;
+    }
+
+    if (selectedGroup.isLocked) {
+      setErrorMessage('Grupo travado. Destrave para editar o nome.');
       return;
     }
 
@@ -407,14 +846,34 @@ function App() {
   };
 
   const startEditingGroup = (group: ProcedureGroup) => {
+    if (group.isLocked) {
+      setErrorMessage('Grupo travado. Destrave para editar.');
+      return;
+    }
+
     setSelectedGroupId(group.id);
     setEditingGroupName(group.name);
     setIsEditingGroupName(true);
   };
 
-  const exportGroupData = async () => {
+  const exportGroupData = async (onlyRecurringDentists = false) => {
     if (!selectedGroup || !analytics) {
       setErrorMessage('Selecione um grupo com dados para exportar.');
+      return;
+    }
+
+    const prioritizedDentistsForPdf = prioritizeDentists(
+      analytics.dentists,
+      checkedGroupCodes,
+      selectedGroup.cutoffPercentage,
+    );
+    const recurringDentistNames = new Set(recurringDentists.map((dentist) => dentist.nomeDentista));
+    const dentistsForPdf = onlyRecurringDentists
+      ? prioritizedDentistsForPdf.filter((dentist) => recurringDentistNames.has(dentist.nomeDentista))
+      : prioritizedDentistsForPdf;
+
+    if (onlyRecurringDentists && dentistsForPdf.length === 0) {
+      setErrorMessage('Nao ha dentistas com recorrencia para exportar neste relatorio.');
       return;
     }
 
@@ -491,54 +950,52 @@ function App() {
     autoTable(doc, {
       startY: docWithTable.lastAutoTable?.finalY ? docWithTable.lastAutoTable.finalY + 18 : 360,
       head: [['Dentista', 'Codigo', 'Procedimento', 'Total', '%']],
-      body: prioritizeDentists(analytics.dentists, checkedGroupCodes, selectedGroup.cutoffPercentage).flatMap(
-        (dentist) => {
-          const dentistStyles = dentist.isPriority
-            ? { textColor: [154, 60, 71] as [number, number, number], fontStyle: 'bold' as const }
-            : {};
+      body: dentistsForPdf.flatMap((dentist) => {
+        const dentistStyles = dentist.isPriority
+          ? { textColor: [154, 60, 71] as [number, number, number], fontStyle: 'bold' as const }
+          : {};
 
-          return dentist.codes.map((code, index) => {
-            const codePercentage = dentist.total > 0 ? (code.total / dentist.total) * 100 : 0;
+        return dentist.codes.map((code, index) => {
+          const codePercentage = dentist.total > 0 ? (code.total / dentist.total) * 100 : 0;
 
-            return [
-              ...(index === 0
-                ? [
-                    {
-                      content: dentist.nomeDentista,
-                      rowSpan: dentist.codes.length,
-                      styles: {
-                        valign: 'middle' as const,
-                        ...dentistStyles,
-                      },
+          return [
+            ...(index === 0
+              ? [
+                  {
+                    content: dentist.nomeDentista,
+                    rowSpan: dentist.codes.length,
+                    styles: {
+                      valign: 'middle' as const,
+                      ...dentistStyles,
                     },
-                  ]
-                : []),
-              {
-                content: code.codigoProcedimento,
-                styles: dentistStyles,
+                  },
+                ]
+              : []),
+            {
+              content: code.codigoProcedimento,
+              styles: dentistStyles,
+            },
+            {
+              content: code.nomeProcedimento,
+              styles: dentistStyles,
+            },
+            {
+              content: String(code.total),
+              styles: {
+                halign: 'right' as const,
+                ...dentistStyles,
               },
-              {
-                content: code.nomeProcedimento,
-                styles: dentistStyles,
+            },
+            {
+              content: `${formatPercent(codePercentage)}%`,
+              styles: {
+                halign: 'right' as const,
+                ...dentistStyles,
               },
-              {
-                content: String(code.total),
-                styles: {
-                  halign: 'right' as const,
-                  ...dentistStyles,
-                },
-              },
-              {
-                content: `${formatPercent(codePercentage)}%`,
-                styles: {
-                  halign: 'right' as const,
-                  ...dentistStyles,
-                },
-              },
-            ];
-          });
-        },
-      ),
+            },
+          ];
+        });
+      }),
       theme: 'grid',
       headStyles: { fillColor: [223, 240, 227], textColor: [35, 49, 39], fontSize: 9 },
       bodyStyles: { fontSize: 8, textColor: [35, 49, 39] },
@@ -561,7 +1018,11 @@ function App() {
     });
 
     doc.save(`${safeGroupName.replace(/[^\w-]+/g, '_')}.pdf`);
-    setFeedback(`Exportacao em PDF do grupo "${safeGroupName}" concluida.`);
+    setFeedback(
+      onlyRecurringDentists
+        ? `Exportacao em PDF do grupo "${safeGroupName}" concluida (somente dentistas com recorrencia).`
+        : `Exportacao em PDF do grupo "${safeGroupName}" concluida.`,
+    );
     setErrorMessage(null);
   };
 
@@ -773,6 +1234,189 @@ function App() {
       </header>
 
       <main className="dashboard">
+        {view === 'charts' ? (
+          <section className="glass-card compact-card charts-screen">
+            <div className="detail-header">
+              <div className="section-heading">
+                <h2>Comparativo mensal</h2>
+                <p>
+                  {chartGroup ? `Grupo: ${chartGroup.name}` : 'Selecione um grupo para ver o historico mensal.'}
+                </p>
+              </div>
+              <div className="detail-actions">
+                {chartGroup && dataset ? (
+                  <button
+                    type="button"
+                    className="primary-button small-button inline-primary"
+                    onClick={() => void saveMonthlyGroupReport(chartGroup)}
+                  >
+                    Adicionar ao relatorio ({formatMonth(datasetCompetencyMonth ?? reportMonth)})
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="ghost-button small-button"
+                  onClick={() => void exportGroupData(true)}
+                  disabled={!selectedGroup || !analytics}
+                  title={!selectedGroup || !analytics ? 'Importe um arquivo para exportar o PDF.' : 'Exportar PDF'}
+                >
+                  Exportar PDF
+                </button>
+                <button type="button" className="ghost-button small-button" onClick={() => setView('dashboard')}>
+                  Voltar
+                </button>
+              </div>
+            </div>
+
+            {isLoadingSnapshots ? <p className="feedback warning">Carregando historico mensal...</p> : null}
+            {chartFeedback ? <p className="feedback success">{chartFeedback}</p> : null}
+
+            {!isLoadingSnapshots && chartGroup && groupSnapshots.length === 0 ? (
+              <p className="empty-state compact-empty">
+                Nenhum relatorio mensal salvo para este grupo. Use "Adicionar ao relatorio" para incluir o mes atual.
+              </p>
+            ) : null}
+
+            {!isLoadingSnapshots && chartGroup && groupSnapshots.length > 0 ? (
+              <div className="charts-layout">
+                <article className="inner-card compact-inner-card">
+                  <h3>Total do grupo por mes</h3>
+                  <div className="bar-list">
+                    {groupSnapshots.map((snapshot) => (
+                      <div key={snapshot.id} className="bar-item">
+                        <div className="bar-labels">
+                          <strong>{formatMonth(snapshot.competencyMonth)}</strong>
+                          <strong>{snapshot.groupTotal}</strong>
+                        </div>
+                        <div className="bar-track">
+                          <div
+                            className="bar-fill"
+                            style={{ width: `${Math.min((snapshot.groupTotal / maxMonthlyTotal) * 100, 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+
+                <article className="inner-card compact-inner-card">
+                  <h3>Codigos marcados por mes</h3>
+                  {codeMonthSeries.length ? (
+                    <div className="monthly-code-grid">
+                      {codeMonthSeries.map((series) => (
+                        <div key={series.codigoProcedimento} className="code-month-card">
+                          <div className="panel-title-row">
+                            <strong>{series.codigoProcedimento}</strong>
+                            <span>{series.nomeProcedimento}</span>
+                          </div>
+                          <div className="bar-list">
+                            {series.series.map((item) => (
+                              <div key={`${series.codigoProcedimento}-${item.month}`} className="bar-item">
+                                <div className="bar-labels">
+                                  <span>{formatMonth(item.month)}</span>
+                                  <strong>
+                                    {item.total}x ({formatPercent(item.percentage)}%)
+                                  </strong>
+                                </div>
+                                <div className="bar-track">
+                                  <div
+                                    className="bar-fill"
+                                    style={{ width: `${Math.min((item.total / series.maxTotal) * 100, 100)}%` }}
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty-state compact-empty">
+                      Nenhum checkbox marcado nos relatorios salvos deste grupo.
+                    </p>
+                  )}
+                </article>
+
+                <article className="inner-card compact-inner-card">
+                  <h3>Dentistas em nao conformidade por mes</h3>
+                  <div className="bar-list">
+                    {priorityDentistSeries.map((item) => (
+                      <div key={item.month} className="bar-item">
+                        <div className="bar-labels">
+                          <span>{formatMonth(item.month)}</span>
+                          <strong>{item.total}</strong>
+                        </div>
+                        <div className="bar-track">
+                          <div
+                            className="bar-fill"
+                            style={{ width: `${Math.min((item.total / maxPriorityDentists) * 100, 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+
+                <article className="inner-card compact-inner-card">
+                  <h3>Recorrencia de dentistas</h3>
+                  {recurringDentists.length ? (
+                    <div className="table-list compact-table-list">
+                      {recurringDentists.map((dentist) => (
+                        <div key={dentist.nomeDentista} className="dentist-card recurring-dentist-toggle expanded">
+                          <div className="dentist-header">
+                            <strong>{dentist.nomeDentista}</strong>
+                            <span>Nao conformidade recorrente</span>
+                          </div>
+                          <div className="row-stats compact-stats">
+                            <strong>{dentist.months}</strong>
+                            <span>meses</span>
+                          </div>
+                          <div className="dentist-details recurring-dentist-details">
+                            {dentist.details.map((detail) => (
+                              <div key={`${dentist.nomeDentista}-${detail.month}`} className="recurring-month-item">
+                                <div className="recurring-month-header">
+                                  <strong>{formatMonth(detail.month)}</strong>
+                                  <span>
+                                    {detail.selectedTotal}/{detail.total} marcados ({formatPercent(detail.selectedPercentage)}
+                                    %)
+                                  </span>
+                                </div>
+                                {detail.checkedCodes.length ? (
+                                  <div className="dentist-codes recurring-codes">
+                                    {detail.checkedCodes.map((code) => (
+                                      <div
+                                        key={`${dentist.nomeDentista}-${detail.month}-${code.codigoProcedimento}`}
+                                        className="dentist-code highlighted"
+                                      >
+                                        <span>{code.codigoProcedimento}</span>
+                                        <span>
+                                          {code.total}x - {formatPercent(code.actualPercentage)}%
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="empty-state compact-empty">
+                                    Sem ocorrencias de codigos marcados neste mes.
+                                  </p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty-state compact-empty">
+                      Ainda nao ha recorrencia em meses diferentes para dentistas em nao conformidade.
+                    </p>
+                  )}
+                </article>
+              </div>
+            ) : null}
+          </section>
+        ) : (
+          <>
         <section className="metrics-grid compact-grid">
           <article className="metric-card glass-card">
             <span className="metric-label">Procedimentos</span>
@@ -900,7 +1544,7 @@ function App() {
                       <button
                         type="button"
                         className={`group-tab ${group.id === selectedGroupId ? 'active' : ''}`}
-                        onClick={() => setSelectedGroupId(group.id)}
+                        onClick={() => selectGroup(group.id)}
                       >
                         <span>{group.name}</span>
                       </button>
@@ -910,6 +1554,7 @@ function App() {
                           className="icon-button small-button group-edit-button"
                           aria-label={`Editar grupo ${group.name}`}
                           onClick={() => startEditingGroup(group)}
+                          disabled={group.isLocked}
                         >
                           <svg viewBox="0 0 24 24" aria-hidden="true">
                             <path
@@ -924,9 +1569,56 @@ function App() {
                         </button>
                         <button
                           type="button"
+                          className="icon-button small-button group-chart-button"
+                          aria-label={`Abrir grafico do grupo ${group.name}`}
+                          onClick={() => void openGroupCharts(group.id)}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path
+                              d="M4 19.5h16M7 16V9.5M12 16V6.5M17 16v-4"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="1.8"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          className={`icon-button small-button ${group.isLocked ? 'group-lock-button locked' : 'group-lock-button unlocked'}`}
+                          aria-label={`${group.isLocked ? 'Destravar' : 'Travar'} grupo ${group.name}`}
+                          onClick={() => toggleGroupLock(group.id)}
+                        >
+                          {group.isLocked ? (
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                              <path
+                                d="M7.5 10V7.2a4.5 4.5 0 0 1 9 0V10m-11 0h13v10h-13V10Z"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.8"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          ) : (
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                              <path
+                                d="M16.5 10V7.2a4.5 4.5 0 0 0-9 0m-2 2.8h13v10h-13V10Z"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.8"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          )}
+                        </button>
+                        <button
+                          type="button"
                           className="icon-button small-button group-delete-button"
                           aria-label={`Excluir grupo ${group.name}`}
-                          onClick={() => deleteGroup(group.id)}
+                          onClick={() => void deleteGroup(group.id)}
                         >
                           <svg viewBox="0 0 24 24" aria-hidden="true">
                             <path
@@ -939,7 +1631,9 @@ function App() {
                             />
                           </svg>
                         </button>
-                        <small>{group.codes.length} codigos</small>
+                        <small>
+                          {group.codes.length} codigos {group.isLocked ? '| travado' : '| destravado'}
+                        </small>
                       </div>
                     </div>
                   ))
@@ -954,14 +1648,36 @@ function App() {
                 <div className="detail-header">
                   <div className="section-heading">
                     <h2>Detalhes do grupo</h2>
-                    <p>Atualizado em {formatDate(selectedGroup.updatedAt)}</p>
+                    <p>
+                      Atualizado em {formatDate(selectedGroup.updatedAt)} |{' '}
+                      {selectedGroup.isLocked
+                        ? 'Grupo travado para edicao (adicao de relatorios mensais liberada)'
+                        : 'Grupo destravado'}
+                    </p>
                   </div>
                   <div className="detail-actions">
-                    <button type="button" className="ghost-button small-button" onClick={exportGroupData}>
+                    <label className="month-selector">
+                      Competencia (dataRealizacao)
+                      <input
+                        type="month"
+                        value={reportMonth}
+                        readOnly
+                        title="Mes identificado automaticamente pela coluna dataRealizacao."
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="primary-button small-button inline-primary"
+                      onClick={() => void saveMonthlyGroupReport(selectedGroup)}
+                    >
+                      {selectedGroup.isLocked ? 'Adicionar ao relatorio' : 'Salvar e travar'}
+                    </button>
+                    <button type="button" className="ghost-button small-button" onClick={() => void exportGroupData()}>
                       Exportar PDF
                     </button>
                   </div>
                 </div>
+                {reportFeedback ? <p className="feedback success">{reportFeedback}</p> : null}
 
                 <div className="group-name-row">
                   <div className="field grow-field">
@@ -972,12 +1688,18 @@ function App() {
                           id="selectedGroupName"
                           value={editingGroupName}
                           onChange={(event) => setEditingGroupName(event.target.value)}
+                          disabled={selectedGroup.isLocked}
                         />
                         <div className="edit-actions">
                           <button type="button" className="ghost-button small-button" onClick={() => setIsEditingGroupName(false)}>
                             Cancelar
                           </button>
-                          <button type="button" className="primary-button small-button inline-primary" onClick={saveGroupName}>
+                          <button
+                            type="button"
+                            className="primary-button small-button inline-primary"
+                            onClick={saveGroupName}
+                            disabled={selectedGroup.isLocked}
+                          >
                             Salvar
                           </button>
                         </div>
@@ -1004,6 +1726,7 @@ function App() {
                             max="100"
                             step="0.1"
                             value={selectedGroup.cutoffPercentage}
+                            disabled={selectedGroup.isLocked}
                             onChange={(event) =>
                               updateGroup(selectedGroup.id, (group) => ({
                                 ...group,
@@ -1032,7 +1755,8 @@ function App() {
                             <input
                               type="checkbox"
                               checked={checkedGroupCodes.includes(code.codigoProcedimento)}
-                              onChange={() => toggleCheckedGroupCode(code.codigoProcedimento)}
+                              onChange={() => toggleCheckedGroupCode(selectedGroup.id, code.codigoProcedimento)}
+                              disabled={selectedGroup.isLocked}
                             />
                           </label>
                           <div className="row-main">
@@ -1047,6 +1771,7 @@ function App() {
                             type="button"
                             className="icon-button small-button group-delete-button"
                             aria-label={`Remover codigo ${code.codigoProcedimento}`}
+                            disabled={selectedGroup.isLocked}
                             onClick={() =>
                               updateGroup(selectedGroup.id, (group) => ({
                                 ...group,
@@ -1130,11 +1855,15 @@ function App() {
 
                   <article className="inner-card compact-inner-card">
                     <h3>Adicionar codigo</h3>
+                    {selectedGroup.isLocked ? (
+                      <p className="subtle-text">Grupo travado. Destrave para editar os codigos.</p>
+                    ) : null}
                     <div className="field inline-field">
                       <input
                         value={editCodeQuery}
                         onChange={(event) => setEditCodeQuery(event.target.value)}
                         placeholder="Buscar codigo para adicionar"
+                        disabled={selectedGroup.isLocked}
                       />
                     </div>
                     <div className="suggestion-panel edit-panel">
@@ -1145,6 +1874,7 @@ function App() {
                             type="button"
                             className="suggestion-item"
                             onClick={() => addCodeToGroup(selectedGroup.id, code.codigoProcedimento)}
+                            disabled={selectedGroup.isLocked}
                           >
                             <strong>{code.codigoProcedimento}</strong>
                             <span>{code.nomeProcedimento}</span>
@@ -1187,6 +1917,8 @@ function App() {
             )}
           </section>
         </section>
+          </>
+        )}
       </main>
 
       {isConfirmDeleteOpen ? (
@@ -1204,7 +1936,7 @@ function App() {
               <button type="button" className="ghost-button small-button" onClick={() => setIsConfirmDeleteOpen(false)}>
                 Cancelar
               </button>
-              <button type="button" className="danger-button small-button" onClick={clearImportedData}>
+              <button type="button" className="danger-button small-button" onClick={() => void clearImportedData()}>
                 Sim, excluir
               </button>
             </div>
