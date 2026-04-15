@@ -9,6 +9,7 @@ import type {
   GroupMonthlySnapshot,
   ImportedDataset,
   ProcedureGroup,
+  ProcedureRecord,
 } from './types';
 
 const formatPercent = (value: number) =>
@@ -46,24 +47,89 @@ const extractMonthFromDate = (value: unknown) => {
   return match ? `${match[1]}-${match[2]}` : null;
 };
 
-const getDatasetCompetencyMonth = (dataset: ImportedDataset) => {
-  if (/^\d{4}-\d{2}$/.test(dataset.competencyMonth)) {
-    return dataset.competencyMonth;
-  }
-
-  const months = Array.from(
+const getDatasetMonths = (dataset: ImportedDataset) =>
+  Array.from(
     new Set(
       dataset.records
         .map((record) => extractMonthFromDate(record.dataRealizacao))
         .filter((month): month is string => Boolean(month)),
     ),
-  );
+  ).sort((a, b) => a.localeCompare(b));
 
-  if (months.length === 1) {
-    return months[0];
+const getDatasetCompetencyMonth = (dataset: ImportedDataset) => {
+  const months = getDatasetMonths(dataset);
+
+  if (months.length === 0) {
+    return normalizeMonthValue(dataset.importedAt.slice(0, 7));
   }
 
-  return normalizeMonthValue(dataset.importedAt.slice(0, 7));
+  if (/^\d{4}-\d{2}$/.test(dataset.competencyMonth) && months.includes(dataset.competencyMonth)) {
+    return dataset.competencyMonth;
+  }
+
+  return months[months.length - 1];
+};
+
+const sortProcedureRecords = (records: ProcedureRecord[]) =>
+  [...records].sort((a, b) => {
+    if (a.dataRealizacao !== b.dataRealizacao) {
+      return a.dataRealizacao.localeCompare(b.dataRealizacao);
+    }
+
+    if (a.nomeDentista !== b.nomeDentista) {
+      return a.nomeDentista.localeCompare(b.nomeDentista, 'pt-BR');
+    }
+
+    if (a.codigoProcedimento !== b.codigoProcedimento) {
+      return a.codigoProcedimento.localeCompare(b.codigoProcedimento, 'pt-BR');
+    }
+
+    return a.nomeProcedimento.localeCompare(b.nomeProcedimento, 'pt-BR');
+  });
+
+const collectDatasetConflicts = (records: ProcedureRecord[]) => {
+  const codeMap = new Map<string, Set<string>>();
+
+  records.forEach((record) => {
+    const current = codeMap.get(record.codigoProcedimento) ?? new Set<string>();
+    current.add(record.nomeProcedimento);
+    codeMap.set(record.codigoProcedimento, current);
+  });
+
+  return Array.from(codeMap.entries())
+    .filter(([, names]) => names.size > 1)
+    .map(([codigoProcedimento, nomes]) => ({
+      codigoProcedimento,
+      nomesProcedimento: Array.from(nomes),
+    }));
+};
+
+const mergeImportedDatasets = (
+  currentDataset: ImportedDataset | null,
+  incomingDataset: ImportedDataset,
+): ImportedDataset => {
+  if (!currentDataset) {
+    return {
+      ...incomingDataset,
+      records: sortProcedureRecords(incomingDataset.records),
+      conflicts: collectDatasetConflicts(incomingDataset.records),
+    };
+  }
+
+  const incomingMonths = new Set(getDatasetMonths(incomingDataset));
+  const preservedRecords = currentDataset.records.filter((record) => {
+    const month = extractMonthFromDate(record.dataRealizacao);
+    return month ? !incomingMonths.has(month) : true;
+  });
+  const mergedRecords = sortProcedureRecords([...preservedRecords, ...incomingDataset.records]);
+
+  return {
+    fileName: incomingDataset.fileName,
+    importedAt: incomingDataset.importedAt,
+    competencyMonth: incomingDataset.competencyMonth,
+    records: mergedRecords,
+    conflicts: collectDatasetConflicts(mergedRecords),
+  };
 };
 
 const sanitizePercentage = (value: string) => {
@@ -152,6 +218,9 @@ type RecurringDentistDetail = {
   details: RecurringMonthDetail[];
 };
 
+type ExportFormat = 'pdf' | 'xlsx';
+type ExportMenuKey = 'dashboard' | 'charts';
+
 const prioritizeDentists = (
   dentists: DentistBreakdown[],
   highlightedCodes: string[],
@@ -198,6 +267,7 @@ function App() {
   const [groups, setGroups] = useState<ProcedureGroup[]>(() => loadGroups());
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(() => loadGroups()[0]?.id ?? null);
   const [view, setView] = useState<'dashboard' | 'charts'>('dashboard');
+  const [openExportMenu, setOpenExportMenu] = useState<ExportMenuKey | null>(null);
   const [reportMonth, setReportMonth] = useState(getCurrentMonth);
   const [chartGroupId, setChartGroupId] = useState<string | null>(null);
   const [groupSnapshots, setGroupSnapshots] = useState<GroupMonthlySnapshot[]>([]);
@@ -321,6 +391,29 @@ function App() {
     setReportMonth(getDatasetCompetencyMonth(dataset));
   }, [dataset]);
 
+  const availableDatasetMonths = useMemo(
+    () => (dataset ? getDatasetMonths(dataset) : []),
+    [dataset],
+  );
+  const reportMonthRecords = useMemo(
+    () =>
+      dataset
+        ? dataset.records.filter((record) => extractMonthFromDate(record.dataRealizacao) === reportMonth)
+        : [],
+    [dataset, reportMonth],
+  );
+  const hasReportMonthData = reportMonthRecords.length > 0;
+
+  useEffect(() => {
+    if (!dataset || availableDatasetMonths.length === 0) {
+      return;
+    }
+
+    if (!availableDatasetMonths.includes(reportMonth)) {
+      setReportMonth(getDatasetCompetencyMonth(dataset));
+    }
+  }, [availableDatasetMonths, dataset, reportMonth]);
+
   useEffect(() => {
     if (groups.length === 0) {
       if (selectedGroupId) {
@@ -339,6 +432,10 @@ function App() {
     window.localStorage.setItem('control-glosa:theme', theme);
   }, [theme]);
 
+  useEffect(() => {
+    setOpenExportMenu(null);
+  }, [view, selectedGroupId, reportMonth]);
+
   const codeSummary: CodeSummary[] = useMemo(
     () => (dataset ? summarizeCodes(dataset.records) : []),
     [dataset],
@@ -351,14 +448,10 @@ function App() {
     () => groups.find((group) => group.id === selectedGroupId) ?? null,
     [groups, selectedGroupId],
   );
-  const datasetCompetencyMonth = useMemo(
-    () => (dataset ? getDatasetCompetencyMonth(dataset) : null),
-    [dataset],
-  );
   const checkedGroupCodes = selectedGroup?.checkedCodes ?? [];
   const analytics = useMemo(
-    () => (selectedGroup && dataset ? analyzeGroup(selectedGroup, dataset.records) : null),
-    [selectedGroup, dataset],
+    () => (selectedGroup ? analyzeGroup(selectedGroup, reportMonthRecords) : null),
+    [selectedGroup, reportMonthRecords],
   );
   const totalDentists = useMemo(
     () => (dataset ? new Set(dataset.records.map((record) => record.nomeDentista)).size : 0),
@@ -427,10 +520,39 @@ function App() {
   const selectGroup = (groupId: string) => {
     setSelectedGroupId(groupId);
     setReportFeedback(null);
+  };
 
-    if (dataset) {
-      setReportMonth(getDatasetCompetencyMonth(dataset));
+  const handleReportMonthChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setReportMonth(normalizeMonthValue(event.target.value));
+    setReportFeedback(null);
+    setChartFeedback(null);
+  };
+
+  const shiftReportMonth = (direction: -1 | 1) => {
+    const currentIndex = availableDatasetMonths.indexOf(reportMonth);
+
+    if (currentIndex === -1) {
+      return;
     }
+
+    const nextMonth = availableDatasetMonths[currentIndex + direction];
+
+    if (!nextMonth) {
+      return;
+    }
+
+    setReportMonth(nextMonth);
+    setReportFeedback(null);
+    setChartFeedback(null);
+  };
+
+  const toggleExportMenu = (menu: ExportMenuKey) => {
+    setOpenExportMenu((current) => (current === menu ? null : menu));
+  };
+
+  const exportByFormat = (format: ExportFormat, onlyRecurringDentists = false) => {
+    setOpenExportMenu(null);
+    void exportGroupData(format, onlyRecurringDentists);
   };
 
   const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -448,9 +570,19 @@ function App() {
 
     try {
       const parsed = await parseUploadedFile(file);
-      setDataset(parsed);
+      const mergedDataset = mergeImportedDatasets(dataset, parsed);
+      const months = getDatasetMonths(parsed);
+      const consolidatedMonths = getDatasetMonths(mergedDataset);
+      const firstMonth = months[0];
+      const lastMonth = months[months.length - 1];
+      const competencyMessage =
+        months.length > 1 && firstMonth && lastMonth
+          ? `${months.length} competencias detectadas (${formatMonth(firstMonth)} ate ${formatMonth(lastMonth)}).`
+          : `Competencia detectada: ${formatMonth(parsed.competencyMonth)}.`;
+      const consolidatedMessage = `Base consolidada: ${mergedDataset.records.length} registros em ${consolidatedMonths.length} competencias.`;
+      setDataset(mergedDataset);
       setFeedback(
-        `${parsed.records.length} registros importados de ${parsed.fileName}. Competencia detectada: ${formatMonth(parsed.competencyMonth)}.`,
+        `${parsed.records.length} registros importados de ${parsed.fileName}. ${competencyMessage} ${consolidatedMessage}`,
       );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Falha ao importar arquivo.');
@@ -602,11 +734,17 @@ function App() {
       return;
     }
 
+    if (!hasReportMonthData) {
+      setReportFeedback(null);
+      setErrorMessage(`Nao ha registros para a competencia ${formatMonth(reportMonth)}.`);
+      return;
+    }
+
     setReportFeedback(null);
     const currentGroup = groups.find((item) => item.id === group.id) ?? group;
-    const competencyMonth = getDatasetCompetencyMonth(dataset);
+    const competencyMonth = reportMonth;
     const now = new Date().toISOString();
-    const currentAnalytics = analyzeGroup(currentGroup, dataset.records);
+    const currentAnalytics = analyzeGroup(currentGroup, reportMonthRecords);
     const selectedDentists = prioritizeDentists(
       currentAnalytics.dentists,
       currentGroup.checkedCodes,
@@ -785,6 +923,17 @@ function App() {
         return a.nomeDentista.localeCompare(b.nomeDentista, 'pt-BR');
       });
   }, [groupSnapshots]);
+  const currentReportMonthIndex = availableDatasetMonths.indexOf(reportMonth);
+  const firstAvailableMonth = availableDatasetMonths[0];
+  const lastAvailableMonth = availableDatasetMonths[availableDatasetMonths.length - 1];
+  const canMoveToPreviousMonth = currentReportMonthIndex > 0;
+  const canMoveToNextMonth =
+    currentReportMonthIndex >= 0 && currentReportMonthIndex < availableDatasetMonths.length - 1;
+  const monthInputTitle = !dataset
+    ? 'Importe um arquivo para selecionar a competencia.'
+    : hasReportMonthData
+      ? 'Mes identificado pela coluna dataRealizacao.'
+      : 'Nao ha registros para a competencia selecionada neste arquivo.';
 
   const toggleDentistExpansion = (dentistName: string) => {
     setExpandedDentists((current) =>
@@ -802,6 +951,7 @@ function App() {
     setGroupSnapshots([]);
     setSelectedGroupId(null);
     setChartGroupId(null);
+    setOpenExportMenu(null);
     setView('dashboard');
     setSelectedCodes([]);
     setGroupName('');
@@ -856,30 +1006,83 @@ function App() {
     setIsEditingGroupName(true);
   };
 
-  const exportGroupData = async (onlyRecurringDentists = false) => {
+  const exportGroupData = async (format: ExportFormat, onlyRecurringDentists = false) => {
     if (!selectedGroup || !analytics) {
       setErrorMessage('Selecione um grupo com dados para exportar.');
       return;
     }
 
-    const prioritizedDentistsForPdf = prioritizeDentists(
+    const prioritizedDentistsForExport = prioritizeDentists(
       analytics.dentists,
       checkedGroupCodes,
       selectedGroup.cutoffPercentage,
     );
     const recurringDentistNames = new Set(recurringDentists.map((dentist) => dentist.nomeDentista));
-    const dentistsForPdf = onlyRecurringDentists
-      ? prioritizedDentistsForPdf.filter((dentist) => recurringDentistNames.has(dentist.nomeDentista))
-      : prioritizedDentistsForPdf;
+    const dentistsForExport = onlyRecurringDentists
+      ? prioritizedDentistsForExport.filter((dentist) => recurringDentistNames.has(dentist.nomeDentista))
+      : prioritizedDentistsForExport;
 
-    if (onlyRecurringDentists && dentistsForPdf.length === 0) {
+    if (onlyRecurringDentists && dentistsForExport.length === 0) {
       setErrorMessage('Nao ha dentistas com recorrencia para exportar neste relatorio.');
+      return;
+    }
+
+    const safeGroupName = selectedGroup.name.trim() || 'grupo';
+    const safeFileName = safeGroupName.replace(/[^\w-]+/g, '_');
+    const suffix = onlyRecurringDentists ? '_recorrencia' : '';
+    const baseFileName = `${safeFileName}_${reportMonth}${suffix}`;
+
+    if (format === 'xlsx') {
+      const XLSX = await import('xlsx');
+      const workbook = XLSX.utils.book_new();
+      const summarySheet = XLSX.utils.aoa_to_sheet([
+        ['Grupo', 'Codigos', 'Ocorrencias', 'Corte percentual'],
+        [safeGroupName, String(selectedGroup.codes.length), String(analytics.groupTotal), `${formatPercent(selectedGroup.cutoffPercentage)}%`],
+      ]);
+      const codesSheet = XLSX.utils.aoa_to_sheet([
+        ['Codigo', 'Procedimento', 'Total', '% real', 'Acima do corte'],
+        ...analytics.codes.map((code) => [
+          code.codigoProcedimento,
+          code.nomeProcedimento,
+          String(code.total),
+          `${formatPercent(code.actualPercentage)}%`,
+          code.actualPercentage >= selectedGroup.cutoffPercentage ? 'Sim' : 'Nao',
+        ]),
+      ]);
+      const dentistRows = dentistsForExport.flatMap((dentist) =>
+        dentist.codes.map((code, index) => {
+          const codePercentage = dentist.total > 0 ? (code.total / dentist.total) * 100 : 0;
+
+          return [
+            index === 0 ? dentist.nomeDentista : '',
+            code.codigoProcedimento,
+            code.nomeProcedimento,
+            String(code.total),
+            `${formatPercent(codePercentage)}%`,
+          ];
+        }),
+      );
+      const dentistsSheet = XLSX.utils.aoa_to_sheet([
+        ['Dentista', 'Codigo', 'Procedimento', 'Total', '%'],
+        ...dentistRows,
+      ]);
+
+      XLSX.utils.book_append_sheet(workbook, summarySheet, 'Resumo');
+      XLSX.utils.book_append_sheet(workbook, codesSheet, 'Codigos');
+      XLSX.utils.book_append_sheet(workbook, dentistsSheet, 'Dentistas');
+
+      XLSX.writeFileXLSX(workbook, `${baseFileName}.xlsx`);
+      setFeedback(
+        onlyRecurringDentists
+          ? `Exportacao em XLSX do grupo "${safeGroupName}" concluida (somente dentistas com recorrencia).`
+          : `Exportacao em XLSX do grupo "${safeGroupName}" concluida.`,
+      );
+      setErrorMessage(null);
       return;
     }
 
     const [{ jsPDF }, autoTableModule] = await Promise.all([import('jspdf'), import('jspdf-autotable')]);
     const autoTable = autoTableModule.default;
-    const safeGroupName = selectedGroup.name.trim() || 'grupo';
     const doc = new jsPDF({
       unit: 'pt',
       format: 'a4',
@@ -950,7 +1153,7 @@ function App() {
     autoTable(doc, {
       startY: docWithTable.lastAutoTable?.finalY ? docWithTable.lastAutoTable.finalY + 18 : 360,
       head: [['Dentista', 'Codigo', 'Procedimento', 'Total', '%']],
-      body: dentistsForPdf.flatMap((dentist) => {
+      body: dentistsForExport.flatMap((dentist) => {
         const dentistStyles = dentist.isPriority
           ? { textColor: [154, 60, 71] as [number, number, number], fontStyle: 'bold' as const }
           : {};
@@ -1017,7 +1220,7 @@ function App() {
       },
     });
 
-    doc.save(`${safeGroupName.replace(/[^\w-]+/g, '_')}.pdf`);
+    doc.save(`${baseFileName}.pdf`);
     setFeedback(
       onlyRecurringDentists
         ? `Exportacao em PDF do grupo "${safeGroupName}" concluida (somente dentistas com recorrencia).`
@@ -1244,24 +1447,79 @@ function App() {
                 </p>
               </div>
               <div className="detail-actions">
+                <label className="month-selector">
+                  Competencia (dataRealizacao)
+                  <div className="month-selector-controls">
+                    <button
+                      type="button"
+                      className="ghost-button small-button month-nav-button"
+                      onClick={() => shiftReportMonth(-1)}
+                      disabled={!dataset || !canMoveToPreviousMonth}
+                    >
+                      Anterior
+                    </button>
+                    <input
+                      type="month"
+                      value={reportMonth}
+                      onChange={handleReportMonthChange}
+                      min={firstAvailableMonth}
+                      max={lastAvailableMonth}
+                      disabled={!dataset}
+                      title={monthInputTitle}
+                    />
+                    <button
+                      type="button"
+                      className="ghost-button small-button month-nav-button"
+                      onClick={() => shiftReportMonth(1)}
+                      disabled={!dataset || !canMoveToNextMonth}
+                    >
+                      Proximo
+                    </button>
+                  </div>
+                  {!hasReportMonthData && dataset ? (
+                    <small className="month-selector-warning">Sem registros para a competencia selecionada.</small>
+                  ) : null}
+                </label>
                 {chartGroup && dataset ? (
                   <button
                     type="button"
                     className="primary-button small-button inline-primary"
                     onClick={() => void saveMonthlyGroupReport(chartGroup)}
+                    disabled={!hasReportMonthData}
                   >
-                    Adicionar ao relatorio ({formatMonth(datasetCompetencyMonth ?? reportMonth)})
+                    Adicionar ao relatorio ({formatMonth(reportMonth)})
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  className="ghost-button small-button"
-                  onClick={() => void exportGroupData(true)}
-                  disabled={!selectedGroup || !analytics}
-                  title={!selectedGroup || !analytics ? 'Importe um arquivo para exportar o PDF.' : 'Exportar PDF'}
-                >
-                  Exportar PDF
-                </button>
+                <div className="export-menu">
+                  <button
+                    type="button"
+                    className="ghost-button small-button export-menu-trigger"
+                    onClick={() => toggleExportMenu('charts')}
+                    disabled={!selectedGroup || !analytics}
+                    aria-expanded={openExportMenu === 'charts'}
+                    title={!selectedGroup || !analytics ? 'Importe um arquivo para exportar.' : 'Escolher formato de exportacao'}
+                  >
+                    Exportar
+                  </button>
+                  {openExportMenu === 'charts' ? (
+                    <div className="export-menu-panel" role="menu" aria-label="Escolher formato de exportacao">
+                      <button
+                        type="button"
+                        className="ghost-button small-button export-menu-option"
+                        onClick={() => exportByFormat('pdf', true)}
+                      >
+                        PDF
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button small-button export-menu-option"
+                        onClick={() => exportByFormat('xlsx', true)}
+                      >
+                        XLSX
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
                 <button type="button" className="ghost-button small-button" onClick={() => setView('dashboard')}>
                   Voltar
                 </button>
@@ -1273,7 +1531,7 @@ function App() {
 
             {!isLoadingSnapshots && chartGroup && groupSnapshots.length === 0 ? (
               <p className="empty-state compact-empty">
-                Nenhum relatorio mensal salvo para este grupo. Use "Adicionar ao relatorio" para incluir o mes atual.
+                Nenhum relatorio mensal salvo para este grupo. Use "Adicionar ao relatorio" para incluir a competencia selecionada.
               </p>
             ) : null}
 
@@ -1658,23 +1916,76 @@ function App() {
                   <div className="detail-actions">
                     <label className="month-selector">
                       Competencia (dataRealizacao)
-                      <input
-                        type="month"
-                        value={reportMonth}
-                        readOnly
-                        title="Mes identificado automaticamente pela coluna dataRealizacao."
-                      />
+                      <div className="month-selector-controls">
+                        <button
+                          type="button"
+                          className="ghost-button small-button month-nav-button"
+                          onClick={() => shiftReportMonth(-1)}
+                          disabled={!dataset || !canMoveToPreviousMonth}
+                        >
+                          Anterior
+                        </button>
+                        <input
+                          type="month"
+                          value={reportMonth}
+                          onChange={handleReportMonthChange}
+                          min={firstAvailableMonth}
+                          max={lastAvailableMonth}
+                          disabled={!dataset}
+                          title={monthInputTitle}
+                        />
+                        <button
+                          type="button"
+                          className="ghost-button small-button month-nav-button"
+                          onClick={() => shiftReportMonth(1)}
+                          disabled={!dataset || !canMoveToNextMonth}
+                        >
+                          Proximo
+                        </button>
+                      </div>
+                      {!hasReportMonthData && dataset ? (
+                        <small className="month-selector-warning">Sem registros para a competencia selecionada.</small>
+                      ) : null}
                     </label>
                     <button
                       type="button"
                       className="primary-button small-button inline-primary"
                       onClick={() => void saveMonthlyGroupReport(selectedGroup)}
+                      disabled={!dataset || !hasReportMonthData}
+                      title={!dataset || !hasReportMonthData ? 'Selecione uma competencia com registros para salvar.' : undefined}
                     >
                       {selectedGroup.isLocked ? 'Adicionar ao relatorio' : 'Salvar e travar'}
                     </button>
-                    <button type="button" className="ghost-button small-button" onClick={() => void exportGroupData()}>
-                      Exportar PDF
-                    </button>
+                    <div className="export-menu">
+                      <button
+                        type="button"
+                        className="ghost-button small-button export-menu-trigger"
+                        onClick={() => toggleExportMenu('dashboard')}
+                        disabled={!selectedGroup || !analytics}
+                        aria-expanded={openExportMenu === 'dashboard'}
+                        title={!selectedGroup || !analytics ? 'Importe um arquivo para exportar.' : 'Escolher formato de exportacao'}
+                      >
+                        Exportar
+                      </button>
+                      {openExportMenu === 'dashboard' ? (
+                        <div className="export-menu-panel" role="menu" aria-label="Escolher formato de exportacao">
+                          <button
+                            type="button"
+                            className="ghost-button small-button export-menu-option"
+                            onClick={() => exportByFormat('pdf')}
+                          >
+                            PDF
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-button small-button export-menu-option"
+                            onClick={() => exportByFormat('xlsx')}
+                          >
+                            XLSX
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
                 {reportFeedback ? <p className="feedback success">{reportFeedback}</p> : null}

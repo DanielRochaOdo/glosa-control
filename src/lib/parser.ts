@@ -223,19 +223,15 @@ const parseSpreadsheet = async (file: File) => {
 };
 
 const detectCompetencyMonth = (records: ProcedureRecord[]): string => {
-  const months = Array.from(new Set(records.map((record) => record.dataRealizacao.slice(0, 7))));
+  const months = Array.from(new Set(records.map((record) => record.dataRealizacao.slice(0, 7)))).sort(
+    (a, b) => a.localeCompare(b),
+  );
 
   if (months.length === 0) {
     throw new Error('Nao foi possivel identificar o mes pela coluna dataRealizacao.');
   }
 
-  if (months.length > 1) {
-    throw new Error(
-      `Arquivo contem mais de um mes em dataRealizacao (${months.join(', ')}). Envie um arquivo por mes.`,
-    );
-  }
-
-  return months[0];
+  return months[months.length - 1];
 };
 
 export const parseUploadedFile = async (file: File): Promise<ImportedDataset> => {

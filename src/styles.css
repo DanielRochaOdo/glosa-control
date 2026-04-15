@@ -216,6 +216,30 @@ button {
   align-items: center;
 }
 
+.export-menu {
+  position: relative;
+}
+
+.export-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 12;
+  display: grid;
+  gap: 6px;
+  min-width: 130px;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow);
+}
+
+.export-menu-option {
+  justify-content: flex-start;
+  text-align: left;
+}
+
 .upload-status-actions {
   display: flex;
   align-items: center;
@@ -634,6 +658,21 @@ button {
   border-radius: 12px;
   padding: 8px 10px;
   font-size: 0.78rem;
+}
+
+.month-selector-controls {
+  display: grid;
+  grid-template-columns: auto minmax(130px, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.month-nav-button {
+  white-space: nowrap;
+}
+
+.month-selector-warning {
+  color: #8d3742;
 }
 
 .charts-screen {
@@ -1101,6 +1140,20 @@ button {
   }
 
   .month-selector {
+    width: 100%;
+  }
+
+  .export-menu {
+    width: 100%;
+  }
+
+  .export-menu-trigger {
+    width: 100%;
+  }
+
+  .export-menu-panel {
+    position: static;
+    margin-top: 6px;
     width: 100%;
   }
 }
